@@ -1,0 +1,108 @@
+# fpgahub board config for the two KR260s — REFERENCE COPY.
+#
+# The authoritative version is the live /etc/fpgahub/config.toml on
+# mapstone-dev. This copy exists so the boards can be rebuilt from
+# scratch and so the config is reviewable; it WILL drift. Deploy with
+# fpgahub's packaging/deploy-kr260-recovery.sh, which is idempotent and
+# validates before restarting the daemon.
+#
+# Also needs, in the [daemon] table:  guard_interval_s = 30
+
+[boards.kr260_01]
+server = "mapstone-dev"
+hub_path = "1-1.2.2.3"
+description = "Kria KR260 #1 (headless Ubuntu 22.04, cpuidle.off=1)"
+board_type = "kr260"
+capabilities = [
+    "zynqmp_jtag_por",
+    "jtag_ftdi",
+]
+
+[boards.kr260_01.naming]
+tty_symlink_dir = "kr260_01"
+net_name = "kr260_01_eth"
+
+[boards.kr260_01.network]
+host_ip = "10.22.27.146/22"
+board_ip = "10.22.24.159"
+board_mac = "00:0a:35:29:1f:81"
+hostname = "kr260-01"
+
+[boards.kr260_01.host]
+dev_host = "mapstone-dev"
+ssh = "ubuntu@10.22.24.159"
+
+[boards.kr260_01.identity]
+jtag_serial = "XFL1MHS3ZB1P"
+
+[boards.kr260_01.online_probe]
+kind = "icmp"
+
+[boards.kr260_01.reset.default]
+method = "kr260_jtag_por"
+confirm = true
+description = "POR over JTAG — the only reliable KR260 recovery (a soft reset wedges the PMU)"
+params = { xsdb = "/tools/Xilinx/2025.2/Vivado/bin/xsdb" }
+
+[boards.kr260_01.reset.reboot]
+method = "kr260_kexec_reboot"
+description = "Everyday reboot via kexec — bypasses the PMUFW reset, so no wedge"
+
+[boards.kr260_01.guard]
+enabled = true
+recover_method = "default"
+offline_ticks = 10
+cooldown_ticks = 20
+max_attempts = 3
+skip_when_leased = true
+
+[boards.kr260_02]
+server = "mapstone-dev"
+hub_path = "1-1.2.2.4"
+description = "Kria KR260 #2 (headless Ubuntu 22.04, cpuidle.off=1)"
+board_type = "kr260"
+capabilities = [
+    "zynqmp_jtag_por",
+    "jtag_ftdi",
+]
+
+[boards.kr260_02.naming]
+tty_symlink_dir = "kr260_02"
+net_name = "kr260_02_eth"
+
+[boards.kr260_02.network]
+host_ip = "10.22.27.146/22"
+board_ip = "10.22.24.153"
+board_mac = "00:0a:35:29:1f:84"
+hostname = "kr260-02"
+
+[boards.kr260_02.host]
+dev_host = "mapstone-dev"
+ssh = "ubuntu@10.22.24.153"
+
+[boards.kr260_02.identity]
+jtag_serial = "XFL1EAUJ5SPO"
+
+[boards.kr260_02.online_probe]
+kind = "icmp"
+
+[boards.kr260_02.reset.default]
+method = "kr260_jtag_por"
+confirm = true
+description = "POR over JTAG — the only reliable KR260 recovery (a soft reset wedges the PMU)"
+params = { xsdb = "/tools/Xilinx/2025.2/Vivado/bin/xsdb" }
+
+[boards.kr260_02.reset.reboot]
+method = "kr260_kexec_reboot"
+description = "Everyday reboot via kexec — bypasses the PMUFW reset, so no wedge"
+
+[boards.kr260_02.guard]
+enabled = true
+recover_method = "default"
+offline_ticks = 10
+cooldown_ticks = 20
+max_attempts = 3
+skip_when_leased = true
+
+# --- [daemon] knob that arms the guard (lives in the [daemon] table) ---
+guard_interval_s = 30

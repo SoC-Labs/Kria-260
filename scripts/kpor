@@ -1,0 +1,20 @@
+#!/bin/bash
+# kpor <board> [--wait] : remote power-on reset of a KR260 over JTAG, to recover a lockup/wedge.
+#   Uses the running hw_server; targets ONLY the named board by its FTDI cable serial
+#   (the hw_server is shared with other boards, so the filter is mandatory).
+B="$1"
+case "$B" in
+  kr260-01|01|XFL1MHS3ZB1P) SER=XFL1MHS3ZB1P; IP=10.22.24.159 ;;
+  kr260-02|02|XFL1EAUJ5SPO) SER=XFL1EAUJ5SPO; IP=10.22.24.153 ;;
+  *) echo "usage: kpor {kr260-01|kr260-02} [--wait]"; exit 2 ;;
+esac
+pgrep -f "[h]w_server" >/dev/null || { echo "[kpor] ERROR: hw_server not running on $(hostname)"; exit 3; }
+source /tools/Xilinx/2025.2/Vivado/settings64.sh >/dev/null 2>&1
+echo "[kpor] JTAG POR -> $B (cable $SER) at $(date +%T)"
+printf 'connect\ntargets -set -nocase -filter {jtag_cable_name =~ "*%s*" && name =~ "*a53*#0*"}\nrst -por\nafter 3000\ndisconnect\n' "$SER" | timeout 70 xsdb >/dev/null 2>&1 \
+  && echo "[kpor] POR issued OK" || { echo "[kpor] xsdb POR FAILED"; exit 4; }
+if [ "$2" = "--wait" ]; then
+  echo "[kpor] waiting for $B to come back..."
+  for i in $(seq 1 30); do sleep 6; ping -c1 -W2 "$IP" >/dev/null 2>&1 && { echo "[kpor] $B back up at $(date +%T)"; exit 0; }; done
+  echo "[kpor] WARNING: $B not pingable after 3 min"; exit 5
+fi
