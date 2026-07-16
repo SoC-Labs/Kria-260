@@ -168,6 +168,88 @@ i.e. the PS-GTR PLL for the lane carrying the **second** USB3 controller (`usb@f
 
 ---
 
+## Issue 5 (PRIMARY) — The stock image's own `cma=1000M` fails to reserve, so the PL can never be programmed
+
+### Symptom
+On the stock Certified Ubuntu 22.04 image, **loading any bitstream fails**, always, for every file and every format:
+
+```
+$ sudo fpgautil -b design.bit.bin -f Full
+BIN FILE loading through FPGA manager failed
+$ cat /sys/class/fpga_manager/fpga0/state
+write error: 0xfffffff4                     # 0xfffffff4 = -12 = -ENOMEM
+```
+
+This is not a bitstream-format problem: a known-good `.bin` and a freshly generated one fail **identically**.
+
+### Root cause
+The image ships `cma=1000M` on its own kernel command line (see Issue 1 for the full cmdline), and **that reservation fails at boot**:
+
+```
+[    0.000000] cma: Failed to reserve 1000 MiB
+[    0.000000] Memory: 3947032K/4194304K available (... 247272K reserved, 0K cma-reserved)
+$ grep -i cma /proc/meminfo
+CmaTotal:              0 kB
+CmaFree:               0 kB
+```
+
+The ZynqMP FPGA manager DMA-allocates a contiguous buffer the size of the bitstream before writing it:
+
+```
+__alloc_pages+0x210/0x240
+__dma_direct_alloc_pages.constprop.0+0x1bc/0x274
+dma_direct_alloc+0x84/0x350
+dma_alloc_attrs+0x84/0xec
+zynqmp_fpga_ops_write+0x78/0x1a0
+fpga_mgr_buf_load+0x70/0x160
+fpga_mgr_firmware_load+0xdc/0x120
+fpga_manager fpga0: Error while writing image data to FPGA
+```
+
+With `CmaTotal=0` that allocation falls back to the buddy allocator, whose largest block is `MAX_ORDER-1` (order-10 = **4 MB** — confirmed via `/proc/buddyinfo`). A KR260 full bitstream is **~7.8 MB**, so the allocation can never succeed. **The failure is arithmetic, not marginal.**
+
+`cma=1000M` cannot be placed under the arm64 DMA-zone limit alongside the ~247 MB of existing low reservations. Notably the vendor `boot.scr` **already uses the safe `512M` for the KD240 branch** and only assigns `1000M` to the K26/KR260 branch:
+
+```
+if test $kria = "KD"; then
+        cma="512M"
+elif  test -n $kria; then
+        cma="1000M"          # <-- KR260 takes this; it fails to reserve
+```
+
+### Impact
+**Out of the box, a KR260 on this image cannot program its PL at all** — the headline use case of the product. Silent, too: nothing at boot warns that CMA is absent; the failure only surfaces later as an opaque `-ENOMEM` from `fpgautil`.
+
+### Confirmed fix / workaround
+Reduce the CMA reservation to a size that actually reserves (512 MiB — the vendor's own KD240 value; ~8 MB would suffice):
+
+```
+sudo sed -i 's|^LINUX_KERNEL_CMDLINE=.*|LINUX_KERNEL_CMDLINE="cpuidle.off=1 cma=512M"|' /etc/default/flash-kernel
+sudo flash-kernel
+strings /boot/firmware/boot.scr.uimg | grep -o cma=512M     # must print before you trust it
+```
+
+`flash-kernel` appends `LINUX_KERNEL_CMDLINE` **after** the built-in args, and the kernel's `cma=` parser takes the **last** occurrence — so the appended `cma=512M` wins over the built-in `cma=1000M` without touching `boot.scr` (which flash-kernel regenerates anyway).
+
+Verified on kr260-02 (2026-07-16):
+
+```
+[    0.000000] cma: Reserved 512 MiB at 0x000000005fc00000
+CmaTotal:         524288 kB
+$ sudo fpgautil -b die_b.bit.bin -f Full
+Time taken to load BIN is 135.000000 Milli Seconds
+BIN FILE loaded through FPGA manager successfully
+$ cat /sys/class/fpga_manager/fpga0/state
+operating
+```
+
+Applying the new cmdline needs a real early-boot; `kexec` (see `LOCKUP_RECOVERY.md`, Layer 1) does that in ~65 s without triggering the Issue-2 reboot wedge.
+
+### Suggested vendor action
+Either lower the K26/KR260 branch to a reservation that fits (e.g. `512M`, matching KD240), or make a failed CMA reservation **loud** — a boot-time error rather than a silent `CmaTotal=0` that surfaces much later as `-ENOMEM` from the FPGA manager.
+
+---
+
 ## Cross-reference (already-known, not re-reporting)
 - **DisplayPort dead on Ubuntu 22.04 with boot FW ≥1.04 until kernel ≥ 5.15.0-1052** — Launchpad #2114250. Relevant because updating boot firmware for a headless board silently removes DP as a fallback.
 

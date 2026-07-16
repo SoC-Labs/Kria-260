@@ -86,17 +86,56 @@ Out of the box it hangs in the initramfs with no monitor. Either:
 
 Default login on the stock image is `ubuntu` / `ubuntu` (forced change on first login).
 
-### 2. Make the headless fix permanent (on the board, as root)
+### 2. Make the headless fix permanent — AND fix CMA, or the PL can never be programmed
 ```
 sudo cp -n /boot/firmware/image.fit     /boot/firmware/image.fit.bak
 sudo cp -n /boot/firmware/boot.scr.uimg /boot/firmware/boot.scr.uimg.bak
-sudo sed -i 's|^LINUX_KERNEL_CMDLINE=.*|LINUX_KERNEL_CMDLINE="cpuidle.off=1"|' /etc/default/flash-kernel
+sudo sed -i 's|^LINUX_KERNEL_CMDLINE=.*|LINUX_KERNEL_CMDLINE="cpuidle.off=1 cma=512M"|' /etc/default/flash-kernel
 sudo flash-kernel                                              # rebuilds boot.scr.uimg + image.fit
 strings /boot/firmware/boot.scr.uimg | grep -o cpuidle.off=1   # MUST print cpuidle.off=1 before you trust it
+strings /boot/firmware/boot.scr.uimg | grep -o cma=512M        # MUST print cma=512M    before you trust it
 ```
 `flash-kernel` appends `LINUX_KERNEL_CMDLINE` after the built-in args, so the result is the
-stock cmdline plus `cpuidle.off=1`. A harmless `Couldn't find DTB` warning is expected — the
+stock cmdline plus these. A harmless `Couldn't find DTB` warning is expected — the
 device trees come from `image-kria.its`, not a standalone DTB.
+
+**Why `cma=512M` is not optional (2026-07-16 — see XILINX_ISSUE_REPORT.md Issue 5).**
+The stock image ships `cma=1000M`, and **that reservation fails** (`cma: Failed to reserve
+1000 MiB` → `CmaTotal: 0 kB`). The ZynqMP FPGA manager DMA-allocates a contiguous buffer the
+size of the bitstream, so with no CMA it falls back to the buddy allocator, whose largest
+block is 4 MB — a ~7.8 MB KR260 bitstream **can never** be loaded. Every `fpgautil` attempt
+dies as `write error: 0xfffffff4` (`-ENOMEM`), *identically for a known-good .bin*, which
+makes it look like a bitstream-format problem. It is not. `512M` is the vendor's own KD240
+value and reserves cleanly (~8 MB would do).
+
+The `cma=` parser takes the **last** occurrence, so the appended `cma=512M` beats the
+built-in `cma=1000M`. Do **not** try to hand-edit `boot.scr` — flash-kernel regenerates it.
+
+Verify after the next boot:
+```
+grep -i cma /proc/meminfo        # CmaTotal must be 524288 kB, NOT 0
+```
+
+**Applying a cmdline change needs a real early-boot, not a `reboot`** (which wedges — Issue 2).
+Use `kexec` with the new args, which re-runs early init in ~65 s without the PMUFW reset:
+```
+NEW=$(sed 's/cma=1000M/cma=512M/' /proc/cmdline)
+sudo kexec -l "/boot/vmlinuz-$(uname -r)" --initrd="/boot/initrd.img-$(uname -r)" --command-line="$NEW"
+sudo systemctl kexec
+```
+(Plain `sudo kreboot` uses `--reuse-cmdline` and will **not** pick up the change.)
+
+### 2b. Load a bitstream (the PL path — no PYNQ on this image)
+The board runs **plain Ubuntu 22.04 with no `pynq` installed** — `import pynq` throws. Any
+tooling that assumes `pynq.Overlay` will not work here. The PL path is the Kria/DFX one:
+```
+# .bit -> .bin is a 127-byte header strip. Do NOT byte-swap: that is the zynq-7000
+# fpga-manager format; ZynqMP wants the raw payload.
+python3 -c "open('d.bit.bin','wb').write(open('d.bit','rb').read()[127:])"
+scp d.bit.bin ubuntu@<board>:~/
+sudo fpgautil -b ~/d.bit.bin -f Full        # ~135 ms; expect "loaded ... successfully"
+cat /sys/class/fpga_manager/fpga0/state     # expect: operating
+```
 
 ### 3. Pin the MAC → stable IP (read *this* board's own MAC first)
 ```
