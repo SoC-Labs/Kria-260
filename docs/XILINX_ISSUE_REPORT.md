@@ -250,6 +250,71 @@ Either lower the K26/KR260 branch to a reservation that fits (e.g. `512M`, match
 
 ---
 
+## Issue 6 (PRIMARY) — Stock boot firmware leaves the PS→PL AFI ports at 128-bit, silently discarding 3 of every 4 words to a 32-bit PL design
+
+### Symptom
+Every AXI/APB register in the PL whose address is **not 16-byte aligned** reads `0x00000000` and
+ignores writes. 16-byte-aligned registers work perfectly. There is no bus error, no timeout and no
+warning — the accesses simply evaporate, so the PL looks alive but subtly, catastrophically wrong.
+
+### Root cause
+On Kria (K26/KR260) the **stock boot firmware configures the PS; a user `psu_init` never runs**.
+The firmware leaves the PS↔PL AFI port widths at **128-bit**:
+
+```
+LPD  afi_fs  0xFF419000  = 0x00000200   -> [9:8] = 2 = 128-bit    (M_AXI_HPM0_LPD)
+FPD  afi_fs  0xFD615000  = 0x00000a00   -> [9:8] = 2 = 128-bit    (M_AXI_HPM0/1_FPD)
+```
+
+A block design built for **32-bit** PS master ports then sees one 128-bit (= 16-byte) beat per
+transaction, and **only the first 32-bit word of each beat reaches the PL**. Address bits [3:2] are
+effectively dead. Both the control plane (LPD) and the data plane (FPD) are affected.
+
+Zynq-7000 boards are immune: their PS7 init *does* run and sets the port width to match the design.
+
+### Impact
+Total, silent, and easy to misdiagnose as an RTL, timing or hardware fault. On our two boards this
+made an inter-board link impossible to bring up **for weeks**: the register that enables the
+link-layer (`0x8403_0208`) and the one holding the lane mask (`0x8403_0214`) are both non-16B-aligned,
+so they read 0 and ignored writes, while the 16B-aligned status registers reported a plausible-looking
+"dead link". We chased cabling, pinout, bitstream staleness, clocking and reset for a full night
+before finding it. Nothing in the tools reports a mismatch between the AFI width and the BD width.
+
+### Reproduction / proof (turn the bug on and off at will)
+```
+# a hardwired constant in our PL and a register with a known reset value:
+#   0x8403_0204 must read 0x00000001   (hardwired 32'h1)
+#   0x8403_0214 must read 0x0000e4e4   (reset value)
+
+devmem 0xFF419000 32 0x200      # force 128-bit (the stock state)
+  -> 0x8403_0204 reads 0x00000000     # constant reads ZERO
+  -> 0x8403_0214 reads 0x00000000
+
+devmem 0xFF419000 32 0x000      # 32-bit, matching the BD
+  -> 0x8403_0204 reads 0x00000001     # correct
+  -> 0x8403_0214 reads 0x0000e4e4     # correct
+```
+
+### Workaround
+Clear `[9:8]` on both AFI registers after boot — see `scripts/afi-width-fix.py`, installed as a
+`systemd` oneshot (`tidelink-afi.service`) before `basic.target`. No rebuild is required; the PL
+design was correct all along.
+
+```
+0xFF419000 &= ~0x300     # LPD / control plane -> 32-bit
+0xFD615000 &= ~0x300     # FPD / data plane    -> 32-bit
+```
+
+### Suggested vendor action
+Make the mismatch **loud**, not silent. Either (a) have the tools emit a warning when a bitstream's
+PS master-port widths disagree with the AFI width the firmware will program, (b) have the FPGA
+manager / DFX flow program the AFI widths from the bitstream's own metadata at load time, or
+(c) document prominently that on Kria the stock firmware owns the AFI configuration and a 32-bit BD
+must reprogram it. Silently dropping 3 of every 4 words is the worst possible failure mode: it looks
+exactly like a hardware fault.
+
+---
+
 ## Cross-reference (already-known, not re-reporting)
 - **DisplayPort dead on Ubuntu 22.04 with boot FW ≥1.04 until kernel ≥ 5.15.0-1052** — Launchpad #2114250. Relevant because updating boot firmware for a headless board silently removes DP as a fallback.
 

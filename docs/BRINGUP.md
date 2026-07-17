@@ -265,3 +265,33 @@ firmware mis-detect the board as `Model: ZynqMP KV260 revB`, its boot script fai
   filable Launchpad / AMD report.
 - **File the report** against `linux-xilinx-zynqmp` (Launchpad) + AMD Kria forum — no prior
   report of this headless hang exists.
+
+
+## Step 3 — Fix the AFI port widths (MANDATORY before any PL register access)
+
+The stock boot firmware leaves the PS↔PL AFI ports at **128-bit**. If your block design uses
+**32-bit** PS master ports, only the first 32-bit word of every 16-byte beat reaches the PL:
+**every register that is not 16-byte aligned silently reads 0 and ignores writes.** No bus error,
+no warning. See `docs/XILINX_ISSUE_REPORT.md` Issue 6.
+
+```
+sudo ./scripts/afi-width-fix.py          # clears [9:8] on 0xFF419000 (LPD) and 0xFD615000 (FPD)
+```
+
+Installed permanently as a systemd oneshot:
+
+```
+sudo install -m 0755 scripts/afi-width-fix.py /usr/local/sbin/tidelink-afi-fix.py
+sudo systemctl enable --now tidelink-afi.service
+```
+
+**Canary — do this before debugging anything else on a Kria.** Pick two PL registers with known
+non-zero values, at least one of them *not* 16-byte aligned, and read them. For TideLink:
+
+```
+0x8403_0204  must read 0x00000001    # a hardwired constant
+0x8403_0214  must read 0x0000e4e4    # a known reset value
+```
+
+If either reads `0x00000000`, the AFI is wrong and **every other register reading you take is a lie**.
+
